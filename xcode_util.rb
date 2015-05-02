@@ -15,17 +15,7 @@ module Util
         # @param [String] lib_path
         # @return ref of the new file
         def project_add_staticlib(to_target, to_group, lib_path)
-            src = Pathname.new(File.expand_path(lib_path))
-            if !group_has_file(to_group, src)
-                FileUtils.copy(src.cleanpath, to_group.real_path + src.basename)
-            end
-
-            files = to_target.project.to_group.files
-            unless ref = files.find { |r| r.path == src.basename }
-            ref =  to_target.project.to_group.new_file(src.basename, :group)
-            end
-            to_target.frameworks_build_phase.add_file_reference(ref, true)
-            ref
+            project_add_file(to_group, Pathname.new(lib_path), [to_target]) 
         end
 
 
@@ -36,15 +26,7 @@ module Util
         # @param [String] bundle_path
         # @return ref of the new file
         def project_add_bundle(to_target, to_group, bundle_path)
-            src = Pathname.new(File.expand_path(bundle_path))
-            FileUtils.cp_rf(src.cleanpath, to_group.real_path + src.basename)
-
-            files = to_target.project.to_group.files
-            unless ref = files.find { |r| r.path == src.basename }
-                ref =  to_target.project.to_group.new_file(src.basename, :group)
-            end
-            to_target.add_resources([ref])
-            ref
+            project_add_file(to_group, Pathname.new(bundle_path), [to_target], true, false)
         end
 
         # 添加Headers
@@ -56,28 +38,58 @@ module Util
             project_add_folder(to_group, header_path)
         end
 
+        # 添加文件（非目录）
+        # 
+        # @param [PBXGroup] to_group
+        # @param [Pathname] file, the path to the file
+        # @param Array of [PBXNativeTarget], which target to add the reasource or lib
+        # @return ref of the new file ref
+        def group_add_normal_file(to_group, file, targets=nil)
+            if to_group[file.basename.to_s]
+                raise ArgumentError.new("<#{to_group}> already has <#{file.basename.to_s}>") 
+            end
+            if !file.exist? || (!should_treat_as_file?(file) && file.directory?)
+                raise ArgumentError.new("<#{file}> does not exist or is a directory")
+            end
 
-        # 递归添加目录
+            relative_path = file.relative_path_from(to_group.real_path)
+            ref = to_group.new_reference(relative_path.basename)
+            ref.set_explicit_file_type
+
+            # 添加到target
+            if targets
+                targets.each { |t| target_add_ref(t, ref) }
+            end
+
+            ref
+        end
+
+        # 递归添加目录或目录
         #
         # @param [PBXGroup] to_group
-        # @param [Pathname] folder, the path to the folder
+        # @param [Pathname] folder or file, the path
         # @param [Bool] copy, if copy the folder to the group real_path
         # @param [Bool] as_group, if set 
         # @param Array of [PBXNativeTarget], which target to add the reasource or lib
-        # @return ref of the new group folder
-        def project_add_folder(to_group, folder, targets=nil, copy_ifneed=true, as_group=true)
-            if to_group[folder.basename.to_s]
-                raise ArgumentError.new("<#{to_group}> already has <#{folder.basename.to_s}>") 
+        # @return ref of the new group or file ref
+        def project_add_file(to_group, file, targets=nil, copy_ifneed=true, as_group=true)
+            if to_group[file.basename.to_s]
+                raise ArgumentError.new("<#{to_group}> already has <#{file.basename.to_s}>") 
             end
-            raise ArgumentError.new("<#{folder}> does not exist or not a directory") if !folder.directory?
+            raise ArgumentError.new("<#{file}> does not exist") if !file.exist?
 
-            # 如果folder已经在to_group目录下那么没有必要拷贝
-            # 这里面有个坑，如果group的物理目录下恰巧有个文件和folder的文件名相同，但是内容完全不一样，也不会拷贝
-            if copy_ifneed && !group_has_file?(to_group, folder)
-                FileUtils.cp_r folder.to_s, to_group.real_path.to_s
-                folder = to_group.real_path + folder.basename
+            # 如果file已经在to_group目录下那么没有必要拷贝
+            # 这里面有个坑，如果group的物理目录下恰巧有个文件和file的文件名相同，但是内容完全不一样，也不会拷贝
+            if copy_ifneed && !group_has_file?(to_group, file)
+                FileUtils.cp_r file.to_s, to_group.real_path.to_s
+                file = to_group.real_path + file.basename
             end
 
+            if !file.directory? || !as_group || should_treat_as_file?(file)
+                return group_add_normal_file(to_group, file, targets)
+            end
+
+            folder = file
             relative_path = folder.relative_path_from(to_group.real_path)
             top_group = to_group.new_group(folder.basename.to_s, relative_path.to_s)
 
@@ -93,18 +105,12 @@ module Util
                 Find.prune if f.basename.to_s.start_with?('.')
                 next if f == folder.realpath
 
-                relative = f.relative_path_from(folder)
-
-                # bundle 物理路径上也是目录所有需要
+                # bundle 物理路径上也是目录
                 if !f.directory? || should_treat_as_file?(f)
+                    relative = f.relative_path_from(folder)
                     g = group_for_path(top_group, relative.dirname.to_s)
-                    ref = g.new_reference(relative.basename)
-                    ref.set_explicit_file_type
-
-                    # 添加到target
-                    if targets
-                        targets.each { |t| target_add_ref(t, ref) }
-                    end
+                    
+                    ref = group_add_normal_file(g, f, targets)
 
                     if should_treat_as_file?(ref.real_path)
                         Find.prune
@@ -116,12 +122,13 @@ module Util
         end
 
         # @param [PBXFileReference]
+        # @param [Pathname]
         def target_add_ref(target, ref)
             if is_static_lib?(ref.real_path)
                 target.frameworks_build_phase.add_file_reference(ref, true)
             end
 
-            if is_bundle?(ref.real_path) 
+            if is_bundle?(ref.real_path) || ref.real_path.directory?
                 target.add_resources([ref])
             end
 
@@ -160,6 +167,8 @@ module Util
             project.main_group.children.find {|g| g.path == gname }
         end
 
+        # @param [PBXGroup]
+        # @param [Pathname]
         def group_has_file?(group, file)
             (file.expand_path <=> group.real_path + file.basename) == 0
         end
@@ -248,6 +257,3 @@ class Log
         @@logger.error(msg)
     end
 end
-
-
-
