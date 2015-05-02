@@ -122,7 +122,7 @@ module Util
             end
 
             if is_bundle?(ref.real_path) 
-                target.add_resources(ref)
+                target.add_resources([ref])
             end
 
             if is_compile_file?(ref.real_path)
