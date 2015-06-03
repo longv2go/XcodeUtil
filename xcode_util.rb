@@ -133,7 +133,7 @@ module Util
             end
 
             if is_compile_file?(ref.real_path)
-                target.resources_build_phase.add_file_reference(ref, true)
+                target.source_build_phase.add_file_reference(ref, true)
             end
         end
 
